@@ -9,6 +9,7 @@ const { notFound, errorHandler } = require("./middleware/errorHandler");
 
 const healthRouter = require("./routes/health");
 const authRouter = require("./routes/auth");
+const resumeRoutes = require("./routes/resumes");
 
 const app = express();
 app.set("trust proxy", 1);
@@ -26,6 +27,7 @@ if(!env.isProd) app.use(morgan("dev"));
 
 app.use('/api/health', healthRouter);
 app.use('/api/auth', authRouter);
+app.use("api/resumes", resumeRoutes);
 
 app.use(notFound);
 app.use(errorHandler);

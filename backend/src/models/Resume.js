@@ -16,5 +16,11 @@ const resumeSchema = new mongoose.Schema(
           },
           lastedVersionNumber: { type: Number, default:0}
      },
-     
-)
+     {
+          timestamps: true 
+     }
+);
+
+resumeSchema.index({ userId: 1, updatedAt: -1 });
+
+module.exports = mongoose.model("Resume", resumeSchema);
