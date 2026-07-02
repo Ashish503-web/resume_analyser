@@ -1,8 +1,8 @@
 const express = require("express");
-const { z } = require("zod");
+const { z, trim } = require("zod");
 const mongoose = require("mongoose");
 
-const asyncHandle = require("../utils/asyncHandler");
+const asyncHandler = require("../utils/asyncHandler");
 const ApiError = require("../utils/apiError");
 
 const { requireAuth } = require("../middleware/auth");
@@ -54,7 +54,7 @@ async function loadVersion(resumeId, versionId) {
 router.post(
      "/",
      uploadPdf("file"),
-     asyncHandle(async (req, res) => {
+     asyncHandler(async (req, res) => {
           const { text, meta } = await extractText(req.file.buffer);
           const parsedSections = await parseStructure(text);
 
@@ -88,7 +88,7 @@ router.post(
 
 router.get(
      "/",
-     asyncHandle(async (req, res) => {
+     asyncHandler(async (req, res) => {
           const resume = await Resume.find({ userId: req.user._id })
                .sort({ updatedAt: -1 }).lean();
                res.json({ resume })
@@ -98,7 +98,7 @@ router.get(
 router.get(
      "/:id",
      validate(idParam, "params"),
-     asyncHandle(async (req, res) => {
+     asyncHandler(async (req, res) => {
           const resume = await loadOwnerResume(req);
           const version = await ResumeVersion.find({ resumeId: resume._id })
                .sort({ versionNumber: 1 }).select("-rawText").lean();
@@ -112,7 +112,7 @@ router.get(
           z.object({ id: objectIdSchema, versionId: objectIdSchema }),
           "params"
      ),
-     asyncHandle(async (req, res ) => {
+     asyncHandler(async (req, res ) => {
           const resume = await loadOwnerResume(req);
           const version = await loadVersion(resume._id, req.params.version);
           res.json({ version });
@@ -122,7 +122,7 @@ router.get(
 router.delete(
      "/:id",
      validate(idParam, "params"),
-     asyncHandle( async (req, res) => {
+     asyncHandler( async (req, res) => {
           const resume = await loadOwnerResume(req);
           await ResumeVersion.deleteMany({ resumeId: resume._id });
           await Analysis.deleteMany({ resumeId: resume._id });
@@ -140,7 +140,7 @@ const analyzerBody = z.object({
 route.post("/:id/analyze",
      analyzerLimiter,
      validate(analyzerBody),
-     asyncHandle(async (req, res) => {
+     asyncHandler(async (req, res) => {
           const resume = await loadOwnerResume(req);
 
           const versionId = req.body.versionId || resume.currentVersionId;
@@ -179,7 +179,7 @@ route.post("/:id/analyze",
 router.get(
      "/:id/analysis",
      validate(idParams, "params"),
-     asyncHandle(async (req, res)=> {
+     asyncHandler(async (req, res)=> {
           const resume = await loadOwnerResume(req);
           const analyses = await Analysis.find({ resumeID: resume._id })
           .sort({ createdAt: -1 }).lean();
@@ -192,7 +192,7 @@ router.get(
      validate(z.object({
           id: objectIdSchema, versionId: objectIdSchema 
      }),),
-     asyncHandle(async (req, res) => {
+     asyncHandler(async (req, res) => {
           const resume = await loadOwnerResume(req);
           const version = await loadVersion(resume._id, req.params.versionId);
           const analysis = await Analysis.findOne({
@@ -223,11 +223,115 @@ function applyRewritesToText(rawText, rewrites) {
      return result;
 }
 
-// function patchBulletsInSections(sections, rewrites){
-//      if(!sections) return null;
-//      const cloned = JSON.parse(JSON.stringify(sections));
-//      for(const r of rewrites) {
-//           if(!r?.original)
-//      }
-// }
+function patchBulletsInSections(sections, rewrites){
+     if(!sections) return null;
+     const cloned = JSON.parse(JSON.stringify(sections));
+     for(const r of rewrites) {
+          if(!r?.original || !r?.rewritten) continue;
+          for(const exp of cloned.experience || []){
+               if(!Array.isArray(exp.bullets)) continue;
+               exp.bullets = exp.bullets.map((b) =>
+                    b=== r.original ? r.rewritten : b 
+               );
+          }
+     }
+     return cloned;
+}
+
+function looksEmpty(sections) {
+     if(!sections) return true;
+     const b = sections.basics || {};
+     const hasIdentity = b.name || b.email || b.title;
+     const hasBody = 
+          sections.summary ||
+          sections.experience?.length ||
+          sections.education?.length ||
+          sections.skills?.length;
+          
+     return !hasIdentity && !hasBody;
+}
+
+
+route.post(
+     "/:id/rewrite",
+     validate(idParam, "params"),
+     validate(rewrittenBody),
+     asyncHandler(async (req, res) => {
+          const resume = await loadOwnerResume(req);
+          const analysis = await Analysis.findOne({
+               _id: req.body.Analysis,
+               resumeId: resume._id,
+          });
+          if(!analysis) throw ApiError.notFound("Analysis not found");
+          const baseVersion = await loadVersion(resume._id, analysis.versionId);
+
+          const selected = req.body.rewriteIds?.length ?
+          analysis.bulletRewrites.filter((r) => 
+               req.body.rewriteIds.includes(r._id.toString())
+          ) : analysis.bulletRewrites;
+          
+          if(!selected.length) {
+               throw ApiError.badRequest("no rewrites selected to apply");
+          }
+          const newRaw = applyRewritesToText(baseVersion.rawText, selected);
+
+          // Safety net: pre-build a structured copy from the base version with the 
+          // chosen bullets swapped in, so v2 never lands with empty sections even  is
+          // Gemini's re-parse fails.
+
+          const patchFormBase = patchBulletsInSections(
+               baseVersion.parsedSections,
+               selected
+          );
+          const reParsed = await parseStructure(newRaw);
+          const finalParsed = looksEmpty(reParsed) ? patchedFromBase : reParsed;
+
+          const nextNumber = resume.latestVersionNumber + 1;
+
+          const newVersion = await ResumeVersion.create({
+               resumeId: resume._id,
+               versionNumber: nextNumber,
+               label: req.body.label?trim() || `V${nextNumber}`,
+               rawText: newRaw,
+               parsedSections: finalParsed,
+               sourceType: "rewrite",
+               parentVersionId: baseVersion._id,
+          });
+
+          resume.latestVersionNumber = nextNumber;
+          resume.currentVersionId = newVersion._id;
+          await resume.save();
+          res.status(201).json({
+               version: newVersion,
+               appliedCount: selected.length,
+          });
+     })
+)
+
+const diffQuery = z.object({
+     from: objectIdSchema,
+     to: objectIdSchema,
+     mode: z.enum(["words","lines"]).optional(),
+});
+
+router.get(
+     "/:id/diff",
+     validate(idParam, "params"),
+     validate(diffQuery, "query"),
+     asyncHandler(async (req, res) => {
+          const resume = await loadOwnerResume(req);
+          const [fromV, toV] = await Promise.all([
+               loadVersion(resume._id, req.query.from),
+               loadVersion(resume._id, req.query.to),
+          ]);
+
+          const parts = diffText(fromV.rawText, toV.rawText, req.query.mode);
+          res.json({
+               from: { id:fromV._id, label: fromV.label, versionNumber: fromV.versionNumber },
+               to: { id: toV._id, label: toV.label, versionNumber: toV.versionNumber },
+               parts,
+               stats: summarize(parts),
+          });
+     })
+)
 module.exports = router;
