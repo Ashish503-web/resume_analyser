@@ -4,20 +4,23 @@ const asyncHandler = require("../utils/asyncHandler");
 const { requireAuth } = require("../middleware/auth");
 
 const Resume = require("../models/Resume");
-const ResumeVersion = require("../models/Analysis");
+const ResumeVersion = require("../models/ResumeVersion");
 const Analysis = require("../models/Analysis");
-const analysis = require("../models/Analysis");
 
 const router = express.Router();
-router.user(requireAuth);
-
+router.use(requireAuth);
 
 router.get(
      "/",
      asyncHandler(async (req, res) => {
           const userId = req.user._id;
-          const resume = (await Resume.find( { userId })).toSorted({ updatedAt: -1 }).lean();
-          const resumeIds = resume.map((r) => r._id);
+
+          // ✅ FIX: correct sorting (NO toSorted)
+          const resumes = await Resume.find({ userId })
+               .sort({ updatedAt: -1 })
+               .lean();
+
+          const resumeIds = resumes.map((r) => r._id);
 
           const [rewriteCount, analysisCount] = await Promise.all([
                ResumeVersion.countDocuments({
@@ -26,44 +29,60 @@ router.get(
                }),
                Analysis.countDocuments({ userId }),
           ]);
-          const latestResumeMeta = resume[0] || null;
+
+          const latestResumeMeta = resumes[0] || null;
 
           let latestResume = null;
           let scoreSeries = [];
           let versionStack = [];
 
-          if(latestResumeMeta) {
-               const version = await ResumeVersion.find({
+          if (latestResumeMeta) {
+               const versions = await ResumeVersion.find({
                     resumeId: latestResumeMeta._id,
-               }).sort({ versionNumber: 1 }).lean();
+               })
+                    .sort({ versionNumber: 1 })
+                    .lean();
 
-               const analysisIds = versions.map((v) => v.latestAnalysisId).filter(Boolean);
-               const analysis = analysisIds.length
-               ? await Analysis.find({ _id: { $in: analysisIds } }).select("_id atsScore versionId createdAt").lean() :
-               [];
-               
+               const analysisIds = versions
+                    .map((v) => v.latestAnalysisId)
+                    .filter(Boolean);
+
+               const analyses = analysisIds.length
+                    ? await Analysis.find({
+                           _id: { $in: analysisIds },
+                      })
+                           .select(
+                                "_id atsScore versionId createdAt keywordsPresent keywordsMissing issues"
+                           )
+                           .lean()
+                    : [];
+
                const scoreByVersion = new Map(
-                    analyses.map((a) => [a.versionId.toString(), a.atsScore])
+                    analyses.map((a) => [a.versionId?.toString(), a.atsScore])
                );
 
                const versionsWithScores = versions.map((v) => ({
                     id: v._id,
-                    label:v.label,
+                    label: v.label,
                     versionNumber: v.versionNumber,
                     sourceType: v.sourceType,
-                    createAt: v.createdAt,
-                    score: scoreByVersion.get(v._id.toString()) ?? null,
+                    createdAt: v.createdAt,
+                    score:
+                         scoreByVersion.get(v._id.toString()) ?? null,
                }));
 
                latestResume = {
                     _id: latestResumeMeta._id,
                     title: latestResumeMeta.title,
-                    latestVersionNumber: latestResumeMeta.latestVersionNumber,
+                    latestVersionNumber:
+                         latestResumeMeta.latestVersionNumber,
                     updatedAt: latestResumeMeta.updatedAt,
-                    currentVersionId: latestResumeMeta.currentVersionId
+                    currentVersionId:
+                         latestResumeMeta.currentVersionId,
                };
 
-               scoreSeries = versionsWithScores.filter((v) => v.score != null)
+               scoreSeries = versionsWithScores
+                    .filter((v) => v.score != null)
                     .map((v) => ({
                          label: v.label,
                          score: v.score,
@@ -71,98 +90,139 @@ router.get(
                          at: v.createdAt,
                     }));
 
-                    const last3 = versionsWithScores.slice(-3);
-                    versionStack = last3.map((v,i,arr) => {
-                         const prev = arr[i-1];
-                         const delta = 
-                              v.score != null && prev?.score != null ? v.score = prev.score : 0;
-                              return {
-                                   id: v.id,
-                                   label: v.label,
-                                   title:
-                                        v.sourceType === "upload"
-                                             ? "Upload"
-                                             : v.sourceType === "rewrite"
-                                             ? "Rewrite pass"
-                                             : v.label,
-                                        score: v.score ?? 0,
-                                        delta,
-                              };
-                    });
+               const last3 = versionsWithScores.slice(-3);
+
+               versionStack = last3.map((v, i, arr) => {
+                    const prev = arr[i - 1];
+
+                    const delta =
+                         v.score != null && prev?.score != null
+                              ? v.score - prev.score
+                              : 0;
+
+                    return {
+                         id: v.id,
+                         label: v.label,
+                         title:
+                              v.sourceType === "upload"
+                                   ? "Upload"
+                                   : v.sourceType === "rewrite"
+                                   ? "Rewrite pass"
+                                   : v.label,
+                         score: v.score ?? 0,
+                         delta,
+                    };
+               });
           }
-          
-          // KPIs derived from history
 
+          // ✅ ALL ANALYSES
           const allAnalyses = await Analysis.find({ userId })
-               .select("astScore keywordPresent keywordsMissing issues createdAt resumeId").sort({ createdAt: 1 })
+               .select(
+                    "atsScore keywordsPresent keywordsMissing issues createdAt resumeId"
+               )
+               .sort({ createdAt: 1 })
                .lean();
-          const latestAnalyses = allAnalyses[allAnalyses.length -1 ] || null;
-          const preAnalysis = allAnalyses[allAnalyses.length -2 ] || null;
 
-          const scoreSpark = allAnalyses.slice(-10).map((a) => ({ v: a.atsScore }));
-          const versionSpark = resume.slice(0, 10)
+          const latestAnalysis =
+               allAnalyses[allAnalyses.length - 1] || null;
+          const prevAnalysis =
+               allAnalyses[allAnalyses.length - 2] || null;
+
+          const scoreSpark = allAnalyses.slice(-10).map((a) => ({
+               v: a.atsScore,
+          }));
+
+          const versionSpark = resumes
+               .slice(0, 10)
                .reverse()
-               .map((r) => ({ v: r.latestVersionNumber || 1 }));
-          const keywordsSpark = allAnalyses
-               .slice(-10)
-               .map((a) => ({ v: (a.keywordsPresent || []).length }));
-          const issuesSpark = allAnalyses
-               .slice(-10)
-               .map((a) => ({ v: (a.issues || []).length }));
+               .map((r) => ({
+                    v: r.latestVersionNumber || 1,
+               }));
+
+          const keywordsSpark = allAnalyses.slice(-10).map((a) => ({
+               v: (a.keywordsPresent || []).length,
+          }));
+
+          const issuesSpark = allAnalyses.slice(-10).map((a) => ({
+               v: (a.issues || []).length,
+          }));
+
           const kpi = {
                atsScore: {
                     value: latestAnalysis?.atsScore ?? null,
                     delta:
-                    latestAnalysis && prevAnalysis
-                         ? latestAnalysis.atsScore - prevAnalysis.atsScore
-                         : null,
+                         latestAnalysis && prevAnalysis
+                              ? latestAnalysis.atsScore -
+                                prevAnalysis.atsScore
+                              : null,
                     spark: scoreSpark,
                },
+
                version: {
-                    value: resume.reduce((sum, r) => sum + (r.latestVersionNumber || 1 ), 0),
+                    value: resumes.reduce(
+                         (sum, r) =>
+                              sum + (r.latestVersionNumber || 1),
+                         0
+                    ),
                     delta: null,
                     spark: versionSpark,
                },
+
                issuesIdentified: {
-                    value: latestAnalyses ? latestAnalyses.issues?.length || 0 : null,
+                    value: latestAnalysis?.issues?.length ?? null,
                     delta:
                          latestAnalysis && prevAnalysis
                               ? (latestAnalysis.issues?.length || 0) -
-                              (prevAnalysis.issues?.length || 0)
+                                (prevAnalysis.issues?.length || 0)
                               : null,
-                         spark: issuesSpark,
+                    spark: issuesSpark,
                },
+
                keywordsMatched: {
-                    value: latestAnalysis ? latestAnalyses.keywordsPresent?.length || 0: null,
-                    total: latestAnalysis
-                         ?(latestAnalysis.keywordsPresent?.length || 0) - 
-                         (prevAnalysis.keywordsMissing?.length || 0)
-                         : null,
+                    value:
+                         latestAnalysis?.keywordsPresent?.length ??
+                         null,
                     delta:
                          latestAnalysis && prevAnalysis
-                         ? (latestAnalysis.keywordsPresent?.length || 0) -
-                         (prevAnalysis.keywordsPresent?.length || 0)    
-                         : null,
+                              ? (latestAnalysis.keywordsPresent
+                                     ?.length || 0) -
+                                (prevAnalysis.keywordsPresent
+                                     ?.length || 0)
+                              : null,
                     spark: keywordsSpark,
-               }
+               },
           };
 
-          const resumeMap = new Map(resumes.map((r) => [r._id.toString(), r]));
+          const resumeMap = new Map(
+               resumes.map((r) => [r._id.toString(), r])
+          );
 
-          const [recentVersions, recentAnalyses] = await Promise.all([
-               ResumeVersion.find({ resumeId: { $in: resumeIds }})
-                    .sort({ createdAt: -1}).limit(10)
-                    .select("resumeId label versionNumber sourceType createdAt")
-                    .lean(),
-               Analysis.find({ userId }).sort({ createdAt: -1 })
-                    .limit(10)
-                    .select("resumeId versionId atsScore createdAt").lean(),
-          ]);
+          const [recentVersions, recentAnalyses] =
+               await Promise.all([
+                    ResumeVersion.find({
+                         resumeId: { $in: resumeIds },
+                    })
+                         .sort({ createdAt: -1 })
+                         .limit(10)
+                         .select(
+                              "resumeId label versionNumber sourceType createdAt"
+                         )
+                         .lean(),
+
+                    Analysis.find({ userId })
+                         .sort({ createdAt: -1 })
+                         .limit(10)
+                         .select(
+                              "resumeId atsScore createdAt"
+                         )
+                         .lean(),
+               ]);
 
           const events = [];
 
-          for(const r of resumes.slice(0,10)) {
-               event.push({
+          // Upload events
+          for (const r of resumes.slice(0, 10)) {
+               events.push({
                     id: `r-${r._id}`,
                     type: "upload",
                     title: `${r.title} uploaded`,
@@ -173,35 +233,53 @@ router.get(
                });
           }
 
-          for(const v of recentVersions){
-               if(v.sourceType !== "rewrite") continue;
-               const resume = resumeMap.get(v.resumeId.toString());
+          // Rewrite events
+          for (const v of recentVersions) {
+               if (v.sourceType !== "rewrite") continue;
+
+               const resume = resumeMap.get(
+                    v.resumeId.toString()
+               );
+
                events.push({
                     id: `v-${v._id}`,
                     type: "rewrite",
-                    title: `${v.label} created for ${resume?.title || "rewrite"}`,
+                    title: `${v.label} created for ${
+                         resume?.title || "resume"
+                    }`,
                     subtitle: "Rewrites applied",
-                    label: `${v.label} created`,
+                    label: v.label,
                     at: v.createdAt,
                     resumeId: v.resumeId,
                });
           }
 
-          for(const a of recentAnalyses){
-               const resume = resumeMap.get(a.resumeId.toString());
+          // Analysis events
+          for (const a of recentAnalyses) {
+               const resume = resumeMap.get(
+                    a.resumeId?.toString()
+               );
+
                events.push({
                     id: `a-${a._id}`,
-                    type: "Analysis",
-                    title: `Analysis complete on ${a.resume?.title || "resume" }`,
+                    type: "analysis",
+                    title: `Analysis complete on ${
+                         resume?.title || "resume"
+                    }`,
                     subtitle: `ATS score ${a.atsScore} / 100`,
-                    label: `${a.label} created`,
+                    label: "Analysis",
                     at: a.createdAt,
                     resumeId: a.resumeId,
                });
           }
 
           const activity = events
-               .sort((a, b) => new Date(b.at) - new Date(a.at)).slice(0,8);
+               .sort(
+                    (a, b) =>
+                         new Date(b.at) - new Date(a.at)
+               )
+               .slice(0, 8);
+
           res.json({
                totals: {
                     resume: resumes.length,
@@ -214,11 +292,8 @@ router.get(
                versionStack,
                kpi,
                activity,
-          })
-
-
+          });
      })
-)
+);
 
 module.exports = router;
-     

@@ -24,7 +24,7 @@ function errorHandler(err, req, res, _next) {
      }else if(err.code === 11000){
           status = 409;
           message = "Duplicate Key";
-          details = error.keyValue;
+          details = err.keyValue;
      }else if(err.name === "ZodError") {
           status = 400;
           message = "Validation failed";

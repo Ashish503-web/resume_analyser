@@ -1,251 +1,161 @@
-const { GoogleGenAI, Type } = require("@google/genai");
+function safeArray(val) {
+  return Array.isArray(val) ? val : [];
+}
 
+function safeString(val) {
+  return typeof val === "string" ? val : "";
+}
 
-const { z } = require("zod");
+/* -------------------------
+   MAIN PARSER
+--------------------------*/
+async function parseResume(text) {
+  if (!text || typeof text !== "string") {
+    return fallbackStructure();
+  }
 
-const env = require("../config/env");
+  // Clean noisy PDF text
+  const cleanText = text
+    .replace(/\r/g, " ")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
 
-const ai = env.geminiApiKey
-    ? new GoogleGenAI({
-          apiKey: env.geminiApiKey,
-      })
-    : null;
+  // Basic heuristic extraction (FAST + SAFE fallback layer)
+  const sections = {
+    basics: extractBasics(cleanText),
+    summary: extractSummary(cleanText),
+    experience: extractExperience(cleanText),
+    education: extractEducation(cleanText),
+    skills: extractSkills(cleanText),
+    projects: extractProjects(cleanText),
+    certifications: extractCertifications(cleanText),
+    languages: [],
+    interests: [],
+  };
 
-const linkSchema = {
-    type: Type.OBJECT,
-    required: ["label", "url"],
-    properties: {
-        label: { type: Type.STRING },
-        url: { type: Type.STRING },
+  return ensureStructure(sections);
+}
+
+/* -------------------------
+   BASIC EXTRACTION HELPERS
+--------------------------*/
+
+function extractBasics(text) {
+  const email =
+    text.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i)?.[0] || "";
+
+  const phone =
+    text.match(/(\+91[\-\s]?)?[0-9]{10}/)?.[0] || "";
+
+  const lines = text.split("\n").slice(0, 5);
+
+  return {
+    name: safeString(lines[0]),
+    title: safeString(lines[1]),
+    location: "",
+    email,
+    phone,
+    links: [],
+  };
+}
+
+function extractSummary(text) {
+  const match = text.match(/summary[:\-]([\s\S]{50,300})/i);
+  return match ? match[1].trim() : "";
+}
+
+function extractExperience(text) {
+  if (!text.toLowerCase().includes("experience")) return [];
+
+  return [
+    {
+      company: "",
+      role: "",
+      location: "",
+      period: "",
+      bullets: [],
     },
-};
+  ];
+}
 
-const responseSchema = {
-    type: Type.OBJECT,
-    required: [
-        "basics",
-        "summary",
-        "experience",
-        "education",
-        "skills",
-        "projects",
-        "certification",
-        "languages",
-        "interests",
-    ],
-    properties: {
-        basics: {
-            type: Type.OBJECT,
-            required: [
-                "name",
-                "title",
-                "location",
-                "email",
-                "phone",
-                "links",
-            ],
-            properties: {
-                name: { type: Type.STRING },
-                title: { type: Type.STRING },
-                location: { type: Type.STRING },
-                email: { type: Type.STRING },
-                phone: { type: Type.STRING },
-                links: {
-                    type: Type.ARRAY,
-                    items: linkSchema,
-                },
-            },
-        },
+function extractEducation(text) {
+  return [];
+}
 
-        summary: {
-            type: Type.STRING,
-        },
+function extractSkills(text) {
+  const match = text.match(/skills[:\-]([\s\S]{20,200})/i);
+  if (!match) return [];
 
-        experience: {
-            type: Type.ARRAY,
-            items: {
-                type: Type.OBJECT,
-                required: [
-                    "company",
-                    "role",
-                    "location",
-                    "period",
-                    "bullets",
-                ],
-                properties: {
-                    company: { type: Type.STRING },
-                    role: { type: Type.STRING },
-                    location: { type: Type.STRING },
-                    period: { type: Type.STRING },
-                    bullets: {
-                        type: Type.ARRAY,
-                        items: {
-                            type: Type.STRING,
-                        },
-                    },
-                },
-            },
-        },
+  return match[1]
+    .split(/,|\n/)
+    .map((s) => s.trim())
+    .filter(Boolean);
+}
 
-        education: {
-            type: Type.ARRAY,
-            items: {
-                type: Type.OBJECT,
-                required: [
-                    "degree",
-                    "school",
-                    "location",
-                    "period",
-                    "details",
-                ],
-                properties: {
-                    degree: { type: Type.STRING },
-                    school: { type: Type.STRING },
-                    location: { type: Type.STRING },
-                    period: { type: Type.STRING },
-                    details: { type: Type.STRING },
-                },
-            },
-        },
+function extractProjects(text) {
+  return [];
+}
 
-        skills: {
-            type: Type.ARRAY,
-            items: {
-                type: Type.STRING,
-            },
-        },
+function extractCertifications(text) {
+  return [];
+}
 
-        projects: {
-            type: Type.ARRAY,
-            items: {
-                type: Type.OBJECT,
-                required: ["name", "description"],
-                properties: {
-                    name: { type: Type.STRING },
-                    description: { type: Type.STRING },
-                    tech: {
-                        type: Type.ARRAY,
-                        items: {
-                            type: Type.STRING,
-                        },
-                    },
-                    links: {
-                        type: Type.ARRAY,
-                        items: linkSchema,
-                    },
-                },
-            },
-        },
-
-        certification: {
-            type: Type.ARRAY,
-            items: {
-                type: Type.OBJECT,
-                required: ["name"],
-                properties: {
-                    name: { type: Type.STRING },
-                    issuer: { type: Type.STRING },
-                    year: { type: Type.STRING },
-                },
-            },
-        },
-
-        languages: {
-            type: Type.ARRAY,
-            items: {
-                type: Type.STRING,
-            },
-        },
-
-        interests: {
-            type: Type.ARRAY,
-            items: {
-                type: Type.STRING,
-            },
-        },
+/* -------------------------
+   STRUCTURE NORMALIZER
+--------------------------*/
+function ensureStructure(s) {
+  return {
+    basics: s.basics || {
+      name: "",
+      title: "",
+      location: "",
+      email: "",
+      phone: "",
+      links: [],
     },
-};
 
-const validator = z.object({
-    basics: z.object({
-        name: z.string().default(""),
-        title: z.string().default(""),
-        location: z.string().default(""),
-        email: z.string().default(""),
-        phone: z.string().default(""),
-        links: z
-            .array(
-                z.object({
-                    label: z.string(),
-                    url: z.string(),
-                })
-            )
-            .default([]),
-    }),
+    summary: s.summary || "",
 
-    summary: z.string().default(""),
+    experience: safeArray(s.experience),
 
-    experience: z
-        .array(
-            z.object({
-                company: z.string().default(""),
-                role: z.string().default(""),
-                location: z.string().default(""),
-                period: z.string().default(""),
-                bullets: z.array(z.string()).default([]),
-            })
-        )
-        .default([]),
+    education: safeArray(s.education),
 
-    education: z
-        .array(
-            z.object({
-                degree: z.string().default(""),
-                school: z.string().default(""),
-                location: z.string().default(""),
-                period: z.string().default(""),
-                details: z.string().default(""),
-            })
-        )
-        .default([]),
+    skills: safeArray(s.skills),
 
-    skills: z.array(z.string()).default([]),
+    projects: safeArray(s.projects),
 
-    projects: z
-        .array(
-            z.object({
-                name: z.string().default(""),
-                description: z.string().default(""),
-                tech: z.array(z.string()).default([]),
-                links: z
-                    .array(
-                        z.object({
-                            label: z.string(),
-                            url: z.string(),
-                        })
-                    )
-                    .default([]),
-            })
-        )
-        .default([]),
+    certifications: safeArray(s.certifications),
 
-    certification: z
-        .array(
-            z.object({
-                name: z.string().default(""),
-                issuer: z.string().default(""),
-                year: z.string().default(""),
-            })
-        )
-        .default([]),
+    languages: safeArray(s.languages),
 
-    languages: z.array(z.string()).default([]),
+    interests: safeArray(s.interests),
+  };
+}
 
-    interests: z.array(z.string()).default([]),
-});
+/* -------------------------
+   FALLBACK STRUCTURE
+--------------------------*/
+function fallbackStructure() {
+  return {
+    basics: {
+      name: "",
+      title: "",
+      location: "",
+      email: "",
+      phone: "",
+      links: [],
+    },
+    summary: "",
+    experience: [],
+    education: [],
+    skills: [],
+    projects: [],
+    certifications: [],
+    languages: [],
+    interests: [],
+  };
+}
 
 module.exports = {
-    ai,
-    responseSchema,
-    validator,
+  parseResume,
 };
