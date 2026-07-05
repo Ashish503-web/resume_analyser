@@ -1,0 +1,15 @@
+// ─────────────────────────────────────────────────────────────────────────────
+// DASHBOARD API — backed by mocks while the backend is offline.
+// TO ENABLE THE REAL BACKEND:
+//   1. Uncomment the `apiClient.get(...)` line below.
+//   2. Delete the mock implementation block underneath.
+//   3. Delete the `import` from "@/mock/*".
+// ─────────────────────────────────────────────────────────────────────────────
+
+import { apiClient } from "./client";
+
+
+export const dashboardApi = {
+  get: () => apiClient.get("/dashboard").then((r) => r.data),
+
+};
